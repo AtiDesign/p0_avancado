@@ -6,6 +6,15 @@ from config import load_config
 from exceptions import AppError
 from llm_client import call_model, parse_response, prepare_request
 
+INSTRUCAO_EXTRATOR = (
+    "Você é um extrator de informações de contato. Extraia do texto fornecido: "
+    "NOMES, E-MAILS, TELEFONES e URLS. Responda em português, estritamente neste formato:\n\n"
+    "NOMES\n------------------------------\n(lista ou 'Nenhum encontrado')\n\n"
+    "E-MAILS\n------------------------------\n(lista ou 'Nenhum encontrado')\n\n"
+    "TELEFONES\n------------------------------\n(lista ou 'Nenhum encontrado')\n\n"
+    "URLS\n------------------------------\n(lista ou 'Nenhuma encontrada')"
+)
+
 
 def processar_extracao():
     texto = entrada.get("1.0", tk.END).strip()
@@ -21,13 +30,15 @@ def processar_extracao():
     def tarefa_llm():
         try:
             config = load_config()
-            headers, payload = prepare_request(texto, config)
+            headers, payload = prepare_request(
+                texto, config, system_override=INSTRUCAO_EXTRATOR
+            )
             response = call_model(headers, payload, config)
             resposta_formatada = parse_response(response)
-            janela.after(0, lambda: exibir_resultado(resposta_formatada))
+            janela.after(0, lambda res=resposta_formatada: exibir_resultado(res))
         except AppError as erro:
-            # Usa exatamente as mensagens amigáveis do seu tratamento de erros!
-            janela.after(0, lambda: exibir_resultado(f"[Aviso] {erro}"))
+            mensagem_erro = f"[Aviso] {erro}"
+            janela.after(0, lambda msg=mensagem_erro: exibir_resultado(msg))
         finally:
             janela.after(
                 0,
@@ -42,7 +53,7 @@ def exibir_resultado(mensagem: str):
     resultado.insert(tk.END, mensagem)
 
 
-# Configuração da Janela (mesmo visual do seu exemplo)
+# Configuração da Janela
 janela = tk.Tk()
 janela.title("Extrator de Informações com LLM (Ollama)")
 janela.geometry("700x520")

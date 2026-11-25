@@ -1,89 +1,96 @@
-# Preparação da requisição, chamada HTTP e tratamento
+import time
 import requests
 from config import AppConfig
-from exceptions import (
-    LLMAuthError,
-    LLMConnectionError,
-    LLMResponseError,
-)
+from exceptions import LLMAuthError, LLMConnectionError, LLMResponseError
+from logger import get_logger
 
-def prepare_request(prompt: str, config: AppConfig) -> tuple[dict, dict]:
-    """Prepara cabeçalhos e corpo da solicitação sem expor segredos nos logs."""
+logger = get_logger()
+
+
+def prepare_request(
+    prompt: str, config: AppConfig, system_override: str | None = None
+) -> tuple[dict, dict]:
+    """Prepara cabeçalhos e corpo da solicitação usando parâmetros externos."""
     headers = {
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
     }
-    instrucao_sistema = (
-        "Você é um extrator de informações de contato. Extraia do texto fornecido: "
-        "NOMES, E-MAILS, TELEFONES e URLS. Responda em português, estritamente neste formato:\n\n"
-        "NOMES\n------------------------------\n(lista ou 'Nenhum encontrado')\n\n"
-        "E-MAILS\n------------------------------\n(lista ou 'Nenhum encontrado')\n\n"
-        "TELEFONES\n------------------------------\n(lista ou 'Nenhum encontrado')\n\n"
-        "URLS\n------------------------------\n(lista ou 'Nenhuma encontrada')"
-    )
+    system_message = system_override if system_override is not None else config.system_prompt
     payload = {
         "model": config.model_name,
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
         "messages": [
-            {"role": "system", "content": instrucao_sistema},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": prompt},
         ],
     }
+    logger.info(
+        "Solicitação preparada | modelo=%s | temperature=%.2f | max_tokens=%d | tamanho_prompt=%d chars",
+        config.model_name,
+        config.temperature,
+        config.max_tokens,
+        len(prompt),
+    )
     return headers, payload
 
-def call_model(headers: dict, payload: dict, config: AppConfig) -> requests.Response:
-    """Executa a chamada HTTP e trata falhas de rede, timeout e status HTTP."""
+
+def call_model(headers: dict, payload: dict, config: AppConfig) -> dict:
+    """Executa a chamada HTTP ao LLM com medição de tempo e logs sem dados sensíveis."""
+    inicio = time.perf_counter()
     try:
         response = requests.post(
             config.api_url,
             headers=headers,
             json=payload,
-            timeout=config.timeout
+            timeout=config.timeout,
         )
-    except requests.exceptions.Timeout:
+    except requests.exceptions.Timeout as exc:
+        logger.warning("Timeout após %ss ao consultar modelo=%s", config.timeout, config.model_name)
         raise LLMConnectionError(
             f"O serviço demorou mais de {config.timeout}s para responder (Timeout). Tente novamente mais tarde."
-        )
-    except requests.exceptions.ConnectionError:
+        ) from exc
+    except requests.exceptions.RequestException as exc:
+        logger.error("Falha de conexão com o endpoint configurado.")
         raise LLMConnectionError(
-            "Não foi possível conectar ao serviço de LLM. Verifique sua rede ou a disponibilidade do servidor."
-        )
-    except requests.exceptions.RequestException:
-        raise LLMConnectionError(
-            "Ocorreu uma falha inesperada na comunicação com o serviço de LLM."
-        )
+            "Não foi possível conectar ao serviço de LLM. Verifique a URL e se o servidor está ativo."
+        ) from exc
+
+    duracao = time.perf_counter() - inicio
+    logger.info("Resposta HTTP recebida | status=%d | duracao=%.2fs", response.status_code, duracao)
 
     if response.status_code in (401, 403):
-        raise LLMAuthError(
-            "Falha de autenticação: a credencial informada é inválida ou não possui permissão."
-        )
-    
+        logger.warning("Falha de autenticação HTTP %d", response.status_code)
+        raise LLMAuthError("Falha de autenticação: verifique sua LLM_API_KEY no arquivo .env.")
     if response.status_code >= 500:
+        logger.error("Indisponibilidade remota HTTP %d", response.status_code)
         raise LLMConnectionError(
-            f"O serviço de LLM está temporariamente indisponível (Erro {response.status_code}). "
-            "Caso utilize infraestrutura institucional, aguarde a recuperação pela equipe técnica."
+            f"O serviço externo está temporariamente indisponível (Código HTTP {response.status_code})."
         )
-
-    if not response.ok:
+    if response.status_code >= 400:
+        logger.warning("Solicitação recusada HTTP %d", response.status_code)
         raise LLMResponseError(
             f"O serviço recusou a solicitação (Código HTTP {response.status_code}). Verifique os parâmetros do modelo."
         )
 
-    return response
-
-def parse_response(response: requests.Response) -> str:
-    """Valida e extrai o texto da resposta do modelo."""
     try:
-        data = response.json()
-    except ValueError:
-        raise LLMResponseError("O serviço retornou uma resposta em formato inválido (não é JSON).")
+        return response.json()
+    except ValueError as exc:
+        logger.error("Corpo da resposta não é um JSON válido.")
+        raise LLMResponseError("A resposta recebida do servidor não está em formato JSON válido.") from exc
 
+
+def parse_response(data: dict) -> str:
+    """Extrai o texto final da resposta sem registrar conteúdo sensível em log."""
     try:
-        # Ajuste o caminho abaixo caso use Google Gemini nativo ou Ollama /api/generate
         content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        raise LLMResponseError("A resposta do modelo veio em uma estrutura inesperada.")
+    except (KeyError, IndexError, TypeError) as exc:
+        logger.error("Estrutura JSON inesperada na resposta do modelo.")
+        raise LLMResponseError("A resposta do modelo veio em um formato inesperado ou incompleto.") from exc
 
-    if not content or not str(content).strip():
+    if not isinstance(content, str) or not content.strip():
+        logger.warning("Modelo retornou conteúdo vazio.")
         raise LLMResponseError("O modelo retornou uma resposta vazia.")
 
-    return str(content).strip()
+    logger.info("Resposta extraída com sucesso | tamanho_resposta=%d chars", len(content))
+    return content.strip()
