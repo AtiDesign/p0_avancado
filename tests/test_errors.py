@@ -23,9 +23,12 @@ class TestLLMErrorHandling(unittest.TestCase):
     def setUp(self):
         self.mock_config = AppConfig(
             api_url="https://api.exemplo.com/v1/chat/completions",
-            api_key="chave-falsa-para-teste",
+            api_key="chave-teste",
             model_name="modelo-teste",
-            timeout=5
+            timeout=5,
+            temperature=0.2,
+            max_tokens=512,
+            system_prompt="Você é um assistente objetivo.",
         )
 
     @patch.dict(os.environ, {"LLM_API_URL": "https://api.exemplo.com", "LLM_API_KEY": "", "LLM_MODEL_NAME": "gpt"}, clear=True)
@@ -34,7 +37,7 @@ class TestLLMErrorHandling(unittest.TestCase):
         """Simula credencial ausente no ambiente."""
         with self.assertRaises(ConfigError) as ctx:
             load_config()
-        self.assertIn("Credencial ausente", str(ctx.exception))
+        self.assertIn("Configuração ausente", str(ctx.exception))
 
     @patch("llm_client.requests.post")
     def test_invalid_credential(self, mock_post):
@@ -46,7 +49,7 @@ class TestLLMErrorHandling(unittest.TestCase):
 
         with self.assertRaises(LLMAuthError) as ctx:
             call_model({}, {}, self.mock_config)
-        self.assertIn("credencial informada é inválida", str(ctx.exception))
+        self.assertIn("Falha de autenticação", str(ctx.exception))
 
     @patch("llm_client.requests.post", side_effect=requests.exceptions.Timeout)
     def test_timeout(self, _mock_post):
@@ -74,7 +77,7 @@ class TestLLMErrorHandling(unittest.TestCase):
 
         with self.assertRaises(LLMResponseError) as ctx:
             parse_response(mock_resp)
-        self.assertIn("estrutura inesperada", str(ctx.exception))
+        self.assertIn("resposta vazia", str(ctx.exception))
 
 
 if __name__ == "__main__":
